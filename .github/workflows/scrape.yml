@@ -15,11 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scrape-and-deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -29,20 +26,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Dependencies
+        run: |
+          pip install certifi
+
       - name: Run Feed Scraper
-        run: python3 rss_scraper.py
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload HTML Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: '.'
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+        run: |
+          python3 rss_scraper.py
 
       - name: Commit Updated Index to Main
         run: |
@@ -51,3 +41,19 @@ jobs:
           git add index.html
           git commit -m "Auto-refresh market feeds [skip ci]" || exit 0
           git push origin main
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

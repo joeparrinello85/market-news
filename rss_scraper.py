@@ -39,7 +39,6 @@ MAX_AGE_HOURS = 24
 
 
 def clean_text(raw_html: str) -> str:
-  """Removes raw HTML tags and decodes entities like &amp; or &#39;"""
   if not raw_html:
     return ''
   clean = re.sub(r'<.*?>', '', raw_html)
@@ -47,13 +46,11 @@ def clean_text(raw_html: str) -> str:
 
 
 def parse_universal_date(date_str: str) -> datetime | None:
-  """Parses RFC-822, RFC-3339, and ISO-8601 dates into a UTC datetime object."""
   if not date_str:
     return None
-
   cleaned = date_str.strip()
 
-  # 1. Standard RSS RFC-822
+  # 1. RSS RFC-822
   try:
     dt = parsedate_to_datetime(cleaned)
     if dt.tzinfo is None:
@@ -62,7 +59,7 @@ def parse_universal_date(date_str: str) -> datetime | None:
   except Exception:
     pass
 
-  # 2. ISO-8601 / RFC-3339
+  # 2. ISO-8601 / Atom
   try:
     iso_clean = cleaned.replace('Z', '+00:00')
     dt = datetime.fromisoformat(iso_clean)
@@ -74,7 +71,20 @@ def parse_universal_date(date_str: str) -> datetime | None:
 
   return None
 
+def sanitize_xml(xml_content: str) -> str:
+  """Fixes unescaped ampersands and invalid control characters that break XML parsers."""
+  if not xml_content:
+    return ""
 
+  # Replace raw '&' that aren't already valid XML entities (&amp;, &lt;, &gt;, &quot;, &apos;, or &#...;)
+  cleaned = re.sub(
+      r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", xml_content
+  )
+
+  # Strip non-printable ASCII control characters (keeps tab, newline, carriage return)
+  cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", cleaned)
+
+  return cleaned
 def scrape_fresh_articles(
     feed_tuple: tuple[str, str, str], max_age_hours=MAX_AGE_HOURS
 ) -> list[dict]:
@@ -87,9 +97,14 @@ def scrape_fresh_articles(
     with urllib.request.urlopen(
         req, context=ssl_context, timeout=10
     ) as response:
-      xml_data = response.read()
+      raw_bytes = response.read()
 
-    root = ET.fromstring(xml_data)
+    # Decode and sanitize raw XML
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+    clean_xml_text = sanitize_xml(raw_text)
+
+    # Parse sanitized XML
+    root = ET.fromstring(clean_xml_text)
 
     # 1. RSS 2.0 (<channel><item>)
     channel = root.find("channel")
@@ -110,7 +125,7 @@ def scrape_fresh_articles(
             "date_str": pub_dt.strftime("%b %d • %I:%M %p UTC")
             if pub_dt
             else "Recent",
-            "desc": clean_text(item.findtext("description", default=""))[:220]
+            "desc": clean_text(item.findtext("description", default=""))[:200]
             + "...",
         })
 
@@ -154,7 +169,7 @@ def scrape_fresh_articles(
                     ),
                     namespaces=ns,
                 )
-            )[:220]
+            )[:200]
             + "...",
         })
 
@@ -164,39 +179,42 @@ def scrape_fresh_articles(
   return articles
 
 
-def generate_html_report(all_articles: list[dict], filename="index.html"):
-  # Sort all articles newest to oldest
-  all_articles.sort(key=lambda x: x["date_obj"], reverse=True)
+def generate_html_report(all_articles: list[dict], filename='index.html'):
+  # Sort all articles strictly by time (newest first)
+  all_articles.sort(key=lambda x: x['date_obj'], reverse=True)
 
-  # Partition articles by section
   sections_data = {
-      "economy": {
-          "title": "🏛️ Economy & Macro",
-          "items": [],
-          "badge_class": "badge-economy",
+      'economy': {
+          'title': '🏛️ Economy & Macro',
+          'items': [],
+          'badge_class': 'badge-economy',
       },
-      "markets": {
-          "title": "📈 Markets & Equities",
-          "items": [],
-          "badge_class": "badge-markets",
+      'markets': {
+          'title': '📈 Markets & Equities',
+          'items': [],
+          'badge_class': 'badge-markets',
       },
-      "crypto": {
-          "title": "⚡ Crypto & Digital Assets",
-          "items": [],
-          "badge_class": "badge-crypto",
+      'crypto': {
+          'title': '⚡ Crypto & Digital Assets',
+          'items': [],
+          'badge_class': 'badge-crypto',
+      },
+      'metals': {
+          'title': '🪙 Precious Metals & Gold',
+          'items': [],
+          'badge_class': 'badge-metals',
       },
   }
 
   for a in all_articles:
-    cat = a.get("category", "markets")
+    cat = a.get('category', 'markets')
     if cat in sections_data:
-      sections_data[cat]["items"].append(a)
+      sections_data[cat]['items'].append(a)
 
-  # Render section HTML
-  sections_html = ""
+  sections_html = ''
   for key, sec in sections_data.items():
-    cards_markup = ""
-    for a in sec["items"]:
+    cards_markup = ''
+    for a in sec['items']:
       cards_markup += f"""
       <article class="news-card">
         <div class="card-meta">
@@ -209,9 +227,9 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
         <p class="card-desc">{a['desc']}</p>
       </article>
       """
-    if not sec["items"]:
+    if not sec['items']:
       cards_markup = (
-          '<p class="empty-state">No articles in the past 24 hours.</p>'
+          '<p class="empty-state">No stories reported in the last 24 hours.</p>'
       )
 
     sections_html += f"""
@@ -231,7 +249,7 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Market Terminal Feed</title>
+  <title>Market News Terminal</title>
   <style>
     :root {{
       --bg-body: #090d16;
@@ -242,7 +260,8 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
       --text-muted: #94a3b8;
       --accent-economy: #34d399;
       --accent-markets: #38bdf8;
-      --accent-crypto: #fbbf24;
+      --accent-crypto: #c084fc;
+      --accent-metals: #eab308;
     }}
 
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -250,11 +269,11 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: var(--bg-body);
       color: var(--text-main);
-      padding: 24px;
+      padding: 24px 20px;
     }}
 
     header {{
-      max-width: 1500px;
+      max-width: 1700px;
       margin: 0 auto 24px auto;
       display: flex;
       justify-content: space-between;
@@ -298,18 +317,18 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
       border-color: var(--accent-markets);
     }}
 
-    /* 3-Column Layout */
+    /* 4-Column Layout */
     .dashboard-grid {{
-      max-width: 1500px;
+      max-width: 1700px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 20px;
       align-items: start;
     }}
 
     .feed-column {{
-      background: rgba(17, 24, 39, 0.4);
+      background: rgba(17, 24, 39, 0.45);
       border: 1px solid var(--border-color);
       border-radius: 12px;
       overflow: hidden;
@@ -378,7 +397,8 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
 
     .badge-economy {{ background: rgba(52, 211, 153, 0.15); color: var(--accent-economy); }}
     .badge-markets {{ background: rgba(56, 189, 248, 0.15); color: var(--accent-markets); }}
-    .badge-crypto  {{ background: rgba(251, 191, 36, 0.15); color: var(--accent-crypto); }}
+    .badge-crypto  {{ background: rgba(192, 132, 252, 0.15); color: var(--accent-crypto); }}
+    .badge-metals  {{ background: rgba(234, 179, 8, 0.15); color: var(--accent-metals); }}
 
     .card-time {{
       font-size: 11px;
@@ -418,8 +438,8 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
 <body>
 
   <header>
-    <h1><span class="live-indicator"></span> Financial News Hub</h1>
-    <input type="text" id="liveSearch" class="search-bar" placeholder="Filter all sections (e.g. CPI, BTC, AAPL)..." />
+    <h1><span class="live-indicator"></span> Market Wire Hub</h1>
+    <input type="text" id="liveSearch" class="search-bar" placeholder="Search across all columns..." />
   </header>
 
   <main class="dashboard-grid">
@@ -441,78 +461,101 @@ def generate_html_report(all_articles: list[dict], filename="index.html"):
 </body>
 </html>"""
 
-  with open(filename, "w", encoding="utf-8") as f:
+  with open(filename, 'w', encoding='utf-8') as f:
     f.write(full_html)
 
-  # webbrowser.open("file://" + os.path.realpath(filename))
-  print(f"Generated 3-section dashboard in {filename}!")
+  print(f'Generated 4-section dashboard in {filename}!')
 
 
 if __name__ == '__main__':
   FEEDS = [
+      # =========================================================================
+      # 1. ECONOMY & CENTRAL BANKS
+      # =========================================================================
+      (
+          'Federal Reserve - Releases',
+          'economy',
+          'https://www.federalreserve.gov/feeds/press_all.xml',
+      ),
+      (
+          'Federal Reserve - Policy',
+          'economy',
+          'https://www.federalreserve.gov/feeds/press_monetary.xml',
+      ),
+      (
+          'FT Global Economy',
+          'economy',
+          'https://www.ft.com/global-economy?format=rss',
+      ),
+      ('FT World News', 'economy', 'https://www.ft.com/world?format=rss'),
+      (
+          'Investing.com Indicators',
+          'economy',
+          'https://www.investing.com/rss/news_14.rss',
+      ),
+      (
+          'SEC Press Releases',
+          'economy',
+          'https://www.sec.gov/news/pressreleases.rss',
+      ),
+      # =========================================================================
+      # 2. MARKETS & EQUITIES
+      # =========================================================================
+      ('Yahoo Finance', 'markets', 'https://finance.yahoo.com/news/rssindex'),
+      (
+          'Seeking Alpha Currents',
+          'markets',
+          'https://seekingalpha.com/market_currents.xml',
+      ),
+      (
+          'MarketWatch Top Stories',
+          'markets',
+          'https://feeds.content.dowjones.io/public/rss/mw_topstories',
+      ),
+      (
+          'MarketWatch Pulse',
+          'markets',
+          'https://feeds.content.dowjones.io/public/rss/mw_bulletins',
+      ),
+      (
+          'Investing.com Stocks',
+          'markets',
+          'https://www.investing.com/rss/news_25.rss',
+      ),
+      ('Benzinga', 'markets', 'https://www.benzinga.com/feed'),
+      ('TechCrunch', 'markets', 'https://techcrunch.com/feed/'),
+      ('OilPrice.com', 'markets', 'https://oilprice.com/rss/main'),
+      # =========================================================================
+      # 3. CRYPTO & DIGITAL ASSETS
+      # =========================================================================
+      (
+          'CoinDesk',
+          'crypto',
+          'https://www.coindesk.com/arc/outboundfeeds/rss/',
+      ),
+      ('Cointelegraph', 'crypto', 'https://cointelegraph.com/rss'),
+      ('Decrypt', 'crypto', 'https://decrypt.co/feed'),
+      ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
+      # =========================================================================
     # =========================================================================
-    # 1. ECONOMY & CENTRAL BANKS
+    # 4. PRECIOUS METALS & GOLD
     # =========================================================================
+    ("GoldSeek", "metals", "https://news.goldseek.com/newsRSS.xml"),
+    ("Mining.com", "metals", "https://www.mining.com/feed/"),
     (
-        "Federal Reserve - All",
-        "economy",
-        "https://www.federalreserve.gov/feeds/press_all.xml",
+        "Investing.com Gold",
+        "metals",
+        "https://www.investing.com/rss/news_289.rss",
     ),
-    (
-        "Federal Reserve - Policy",
-        "economy",
-        "https://www.federalreserve.gov/feeds/press_monetary.xml",
-    ),
-    ("FT Global Economy", "economy", "https://www.ft.com/global-economy?format=rss"),
-    ("FT World News", "economy", "https://www.ft.com/world?format=rss"),
-    (
-        "Investing.com - Eco Indicators",
-        "economy",
-        "https://www.investing.com/rss/news_14.rss",
-    ),
-    ("SEC Press Releases", "economy", "https://www.sec.gov/news/pressreleases.rss"),
-    # =========================================================================
-    # 2. MARKETS & EQUITIES
-    # =========================================================================
-    ("Yahoo Finance", "markets", "https://finance.yahoo.com/news/rssindex"),
-    (
-        "Seeking Alpha Currents",
-        "markets",
-        "https://seekingalpha.com/market_currents.xml",
-    ),
-    (
-        "MarketWatch Top Stories",
-        "markets",
-        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-    ),
-    (
-        "MarketWatch Pulse",
-        "markets",
-        "https://feeds.content.dowjones.io/public/rss/mw_bulletins",
-    ),
-    ("Investing.com Stocks", "markets", "https://www.investing.com/rss/news_25.rss"),
-    ("Benzinga", "markets", "https://www.benzinga.com/feed"),
-    ("TechCrunch", "markets", "https://techcrunch.com/feed/"),
-    ("OilPrice.com", "markets", "https://oilprice.com/rss/main"),
-    # =========================================================================
-    # 3. CRYPTO & DIGITAL ASSETS
-    # =========================================================================
-    (
-        "CoinDesk",
-        "crypto",
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    ),
-    ("Cointelegraph", "crypto", "https://cointelegraph.com/rss"),
-    ("Decrypt", "crypto", "https://decrypt.co/feed"),
-    ("Bitcoin Magazine", "crypto", "https://bitcoinmagazine.com/.rss/full/"),
-]
+    ("King World News", "metals", "https://kingworldnews.com/feed/"),
+  ]
 
   collected = []
-  print(f'Fetching {len(FEEDS)} feeds in parallel...')
+  print(f'Fetching {len(FEEDS)} feeds across 4 sections in parallel...')
 
   with ThreadPoolExecutor(max_workers=15) as executor:
     results = list(executor.map(scrape_fresh_articles, FEEDS))
     for res in results:
       collected.extend(res)
 
-  generate_html_report(collected)
+  generate_html_report(collected, filename='index.html')

@@ -205,7 +205,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Market Wire Hub</title>
+  <title>Market-News</title>
   <style>
     :root {{
       --bg-body: #090d16;
@@ -478,7 +478,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
   <header>
     <div class="brand">
       <span class="live-indicator"></span>
-      <h1>Market Wire Hub</h1>
+      <h1>Market News</h1>
     </div>
     <input type="text" id="searchInput" class="search-bar" placeholder="Filter stream..." />
   </header>

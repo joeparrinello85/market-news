@@ -35,6 +35,7 @@ HEADERS = {
 }
 
 MAX_AGE_HOURS = 24
+INITIAL_VISIBLE_COUNT = 4
 
 
 def clean_text(raw_html: str) -> str:
@@ -120,7 +121,7 @@ def scrape_fresh_articles(
                 pub_dt.strftime('%b %d • %I:%M %p UTC') if pub_dt else 'Recent'
             ),
             'desc': (
-                clean_text(item.findtext('description', default=''))[:200]
+                clean_text(item.findtext('description', default=''))[:180]
                 + '...'
             ),
         })
@@ -166,7 +167,7 @@ def scrape_fresh_articles(
                         ),
                         namespaces=ns,
                     )
-                )[:200]
+                )[:180]
                 + '...'
             ),
         })
@@ -177,10 +178,13 @@ def scrape_fresh_articles(
   return articles
 
 
-def build_card_html(article: dict) -> str:
+def build_card_html(article: dict, is_hidden: bool) -> str:
   badge_class = f"badge-{article.get('category', 'markets')}"
+  hidden_class = ' card-extra' if is_hidden else ''
+  hidden_style = ' style="display: none;"' if is_hidden else ''
+
   return f"""
-  <article class="news-card" data-category="{article.get('category', 'markets')}">
+  <article class="news-card{hidden_class}" data-category="{article.get('category', 'markets')}"{hidden_style}>
     <div class="card-meta">
       <div class="card-tags">
         <span class="badge {badge_class}">{article['category'].upper()}</span>
@@ -199,23 +203,78 @@ def build_card_html(article: dict) -> str:
 def generate_html_report(all_articles: list[dict], filename='index.html'):
   all_articles.sort(key=lambda x: x['date_obj'], reverse=True)
 
-  tradfi_articles = [
-      a for a in all_articles if a.get('category') in ['economy', 'markets']
-  ]
-  alts_articles = [
-      a for a in all_articles if a.get('category') in ['metals', 'crypto']
+  sections_config = [
+      (
+          'economy',
+          '🏛️ Economy & Macro Policy',
+          'badge-economy',
+          'var(--accent-economy)',
+      ),
+      (
+          'markets',
+          '📈 Markets & Equities',
+          'badge-markets',
+          'var(--accent-markets)',
+      ),
+      (
+          'metals',
+          '🪙 Precious Metals & Gold',
+          'badge-metals',
+          'var(--accent-metals)',
+      ),
+      (
+          'crypto',
+          '⚡ Crypto & Digital Assets',
+          'badge-crypto',
+          'var(--accent-crypto)',
+      ),
   ]
 
-  tradfi_cards = (
-      ''.join([build_card_html(a) for a in tradfi_articles])
-      if tradfi_articles
-      else '<p class="empty-state">No traditional finance stories reported.</p>'
-  )
-  alts_cards = (
-      ''.join([build_card_html(a) for a in alts_articles])
-      if alts_articles
-      else '<p class="empty-state">No alternative asset stories reported.</p>'
-  )
+  sections_html = ''
+  for cat_key, cat_title, badge_cls, accent_col in sections_config:
+    items = [a for a in all_articles if a.get('category') == cat_key]
+
+    if not items:
+      cards_markup = (
+          '<p class="empty-state">No stories reported in the last 24 hours.</p>'
+      )
+      expand_button_markup = ''
+    else:
+      cards_markup = ''
+      for idx, item in enumerate(items):
+        is_extra = idx >= INITIAL_VISIBLE_COUNT
+        cards_markup += build_card_html(item, is_hidden=is_extra)
+
+      remaining = len(items) - INITIAL_VISIBLE_COUNT
+      if remaining > 0:
+        expand_button_markup = f"""
+        <div class="expand-footer">
+          <button class="expand-btn" onclick="toggleSection('{cat_key}')" id="btn-{cat_key}">
+            <span>Show {remaining} More Headlines</span>
+            <svg class="chevron-icon" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+            </svg>
+          </button>
+        </div>
+        """
+      else:
+        expand_button_markup = ''
+
+    sections_html += f"""
+    <section class="collapsible-section" id="sec-{cat_key}">
+      <div class="section-banner">
+        <div class="banner-left">
+          <span class="accent-bar" style="background: {accent_col};"></span>
+          <h2>{cat_title}</h2>
+        </div>
+        <span class="section-counter">{len(items)} Stories</span>
+      </div>
+      <div class="cards-grid" id="grid-{cat_key}">
+        {cards_markup}
+      </div>
+      {expand_button_markup}
+    </section>
+    """
 
   full_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -227,8 +286,9 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     :root {{
       --bg-body: #090d16;
       --bg-surface: #111827;
-      --bg-surface-hover: #172136;
+      --bg-surface-hover: #162032;
       --border-color: #1e293b;
+      --border-subtle: rgba(255, 255, 255, 0.07);
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
       --accent-economy: #34d399;
@@ -243,11 +303,12 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       background-color: var(--bg-body);
       color: var(--text-main);
       padding: 24px 20px;
+      line-height: 1.5;
     }}
 
     header {{
-      max-width: 1440px;
-      margin: 0 auto 24px auto;
+      max-width: 1200px;
+      margin: 0 auto 32px auto;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -293,61 +354,63 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       border-color: var(--accent-markets);
     }}
 
-    .dashboard-split {{
-      max-width: 1440px;
+    .main-feed-container {{
+      max-width: 1200px;
       margin: 0 auto;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
-      align-items: start;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
     }}
 
-    @media (max-width: 920px) {{
-      .dashboard-split {{
-        grid-template-columns: 1fr;
-      }}
-    }}
-
-    .column-panel {{
-      background: rgba(17, 24, 39, 0.45);
+    .collapsible-section {{
+      background: rgba(17, 24, 39, 0.4);
       border: 1px solid var(--border-color);
       border-radius: 12px;
       overflow: hidden;
     }}
 
-    .column-header {{
+    .section-banner {{
       background: var(--bg-surface);
-      padding: 16px 20px;
+      padding: 14px 20px;
       border-bottom: 1px solid var(--border-color);
       display: flex;
       justify-content: space-between;
       align-items: center;
-      position: sticky;
-      top: 0;
-      z-index: 10;
     }}
 
-    .column-title {{
-      font-size: 15px;
-      font-weight: 600;
+    .banner-left {{
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
     }}
 
-    .column-count {{
+    .accent-bar {{
+      width: 4px;
+      height: 18px;
+      border-radius: 2px;
+    }}
+
+    .section-banner h2 {{
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+    }}
+
+    .section-counter {{
       font-size: 11px;
       color: var(--text-muted);
       background: rgba(255, 255, 255, 0.05);
-      padding: 2px 8px;
+      padding: 3px 9px;
       border-radius: 12px;
+      font-weight: 500;
     }}
 
-    .card-stream {{
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 16px;
+    /* 2x2 grid inside each collapsible section */
+    .cards-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+      padding: 18px;
     }}
 
     .news-card {{
@@ -355,11 +418,15 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       border: 1px solid var(--border-color);
       border-radius: 8px;
       padding: 14px 16px;
-      transition: transform 0.15s ease, background 0.15s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
     }}
 
     .news-card:hover {{
       background: var(--bg-surface-hover);
+      border-color: rgba(255, 255, 255, 0.15);
       transform: translateY(-1px);
     }}
 
@@ -391,8 +458,8 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
 
     .source-tag {{
       font-size: 11px;
-      font-weight: 500;
       color: var(--text-muted);
+      font-weight: 500;
     }}
 
     .card-time {{
@@ -403,7 +470,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     .card-title {{
       font-size: 14px;
       line-height: 1.4;
-      margin-bottom: 6px;
+      margin-bottom: 8px;
       font-weight: 600;
     }}
 
@@ -422,9 +489,48 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       color: var(--text-muted);
     }}
 
-    .empty-state {{
+    .expand-footer {{
+      border-top: 1px solid var(--border-subtle);
+      padding: 10px 18px;
       text-align: center;
-      padding: 30px;
+      background: rgba(17, 24, 39, 0.2);
+    }}
+
+    .expand-btn {{
+      background: none;
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      padding: 6px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }}
+
+    .expand-btn:hover {{
+      color: var(--text-main);
+      border-color: rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.03);
+    }}
+
+    .chevron-icon {{
+      width: 14px;
+      height: 14px;
+      transition: transform 0.2s ease;
+    }}
+
+    .chevron-icon.rotated {{
+      transform: rotate(180deg);
+    }}
+
+    .empty-state {{
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 32px;
       color: var(--text-muted);
       font-size: 13px;
     }}
@@ -437,42 +543,58 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       <span class="live-indicator"></span>
       <h1>Market Wire Hub</h1>
     </div>
-    <input type="text" id="liveSearch" class="search-bar" placeholder="Search headlines & sources..." />
+    <input type="text" id="liveSearch" class="search-bar" placeholder="Search across all sectors..." />
   </header>
 
-  <main class="dashboard-split">
-    <!-- Left Column: Macro & Markets -->
-    <section class="column-panel">
-      <div class="column-header">
-        <div class="column-title">🏛️ Macro, Economy & Equities</div>
-        <span class="column-count">{len(tradfi_articles)} items</span>
-      </div>
-      <div class="card-stream">
-        {tradfi_cards}
-      </div>
-    </section>
-
-    <!-- Right Column: Precious Metals & Crypto -->
-    <section class="column-panel">
-      <div class="column-header">
-        <div class="column-title">🪙 Metals, Gold & Digital Assets</div>
-        <span class="column-count">{len(alts_articles)} items</span>
-      </div>
-      <div class="card-stream">
-        {alts_cards}
-      </div>
-    </section>
+  <main class="main-feed-container">
+    {sections_html}
   </main>
 
   <script>
+    function toggleSection(catKey) {{
+      const grid = document.getElementById('grid-' + catKey);
+      const btn = document.getElementById('btn-' + catKey);
+      const extras = grid.querySelectorAll('.card-extra');
+      const chevron = btn.querySelector('.chevron-icon');
+      const label = btn.querySelector('span');
+
+      const isHidden = extras[0] && extras[0].style.display === 'none';
+
+      extras.forEach(card => {{
+        card.style.display = isHidden ? 'flex' : 'none';
+      }});
+
+      if (isHidden) {{
+        chevron.classList.add('rotated');
+        label.textContent = 'Show Fewer';
+      }} else {{
+        chevron.classList.remove('rotated');
+        label.textContent = 'Show ' + extras.length + ' More Headlines';
+      }}
+    }}
+
+    // Real-time Search Handler
     const search = document.getElementById('liveSearch');
-    const cards = document.querySelectorAll('.news-card');
+    const allCards = document.querySelectorAll('.news-card');
 
     search.addEventListener('input', () => {{
-      const query = search.value.toLowerCase();
-      cards.forEach(card => {{
+      const query = search.value.toLowerCase().trim();
+
+      allCards.forEach(card => {{
         const text = card.innerText.toLowerCase();
-        card.style.display = text.includes(query) ? 'block' : 'none';
+        if (!query) {{
+          // Revert to collapsed state if empty
+          if (card.classList.contains('card-extra')) {{
+            const sec = card.closest('.collapsible-section');
+            const btn = sec.querySelector('.expand-btn');
+            const isExpanded = btn && btn.querySelector('.chevron-icon').classList.contains('rotated');
+            card.style.display = isExpanded ? 'flex' : 'none';
+          }} else {{
+            card.style.display = 'flex';
+          }}
+        }} else {{
+          card.style.display = text.includes(query) ? 'flex' : 'none';
+        }}
       }});
     }});
   </script>
@@ -482,7 +604,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
   with open(filename, 'w', encoding='utf-8') as f:
     f.write(full_html)
 
-  print(f'Generated 2-column split dashboard in {filename}!')
+  print(f'Generated Stacked Collapsible dashboard in {filename}!')
 
 
 if __name__ == '__main__':
@@ -544,18 +666,7 @@ if __name__ == '__main__':
       ('TechCrunch', 'markets', 'https://techcrunch.com/feed/'),
       ('OilPrice.com', 'markets', 'https://oilprice.com/rss/main'),
       # =========================================================================
-      # 3. CRYPTO & DIGITAL ASSETS
-      # =========================================================================
-      (
-          'CoinDesk',
-          'crypto',
-          'https://www.coindesk.com/arc/outboundfeeds/rss/',
-      ),
-      ('Cointelegraph', 'crypto', 'https://cointelegraph.com/rss'),
-      ('Decrypt', 'crypto', 'https://decrypt.co/feed'),
-      ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
-      # =========================================================================
-      # 4. PRECIOUS METALS & MINING
+      # 3. PRECIOUS METALS & MINING
       # =========================================================================
       ('GoldSeek', 'metals', 'https://news.goldseek.com/newsRSS.xml'),
       ('Mining.com', 'metals', 'https://www.mining.com/feed/'),
@@ -566,6 +677,17 @@ if __name__ == '__main__':
       ),
       ('MiningFeeds', 'metals', 'https://www.miningfeeds.com/feed/'),
       ('King World News', 'metals', 'https://kingworldnews.com/feed/'),
+      # =========================================================================
+      # 4. CRYPTO & DIGITAL ASSETS
+      # =========================================================================
+      (
+          'CoinDesk',
+          'crypto',
+          'https://www.coindesk.com/arc/outboundfeeds/rss/',
+      ),
+      ('Cointelegraph', 'crypto', 'https://cointelegraph.com/rss'),
+      ('Decrypt', 'crypto', 'https://decrypt.co/feed'),
+      ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
   ]
 
   collected = []

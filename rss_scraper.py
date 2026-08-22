@@ -6,7 +6,6 @@ import os
 import re
 import ssl
 import urllib.request
-import webbrowser
 import xml.etree.ElementTree as ET
 
 # Configure SSL context
@@ -45,6 +44,17 @@ def clean_text(raw_html: str) -> str:
   return html.unescape(clean).strip()
 
 
+def sanitize_xml(xml_content: str) -> str:
+  """Fixes unescaped ampersands and invalid control characters that break XML parsers."""
+  if not xml_content:
+    return ''
+  cleaned = re.sub(
+      r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', xml_content
+  )
+  cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
+  return cleaned
+
+
 def parse_universal_date(date_str: str) -> datetime | None:
   if not date_str:
     return None
@@ -71,20 +81,7 @@ def parse_universal_date(date_str: str) -> datetime | None:
 
   return None
 
-def sanitize_xml(xml_content: str) -> str:
-  """Fixes unescaped ampersands and invalid control characters that break XML parsers."""
-  if not xml_content:
-    return ""
 
-  # Replace raw '&' that aren't already valid XML entities (&amp;, &lt;, &gt;, &quot;, &apos;, or &#...;)
-  cleaned = re.sub(
-      r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", xml_content
-  )
-
-  # Strip non-printable ASCII control characters (keeps tab, newline, carriage return)
-  cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", cleaned)
-
-  return cleaned
 def scrape_fresh_articles(
     feed_tuple: tuple[str, str, str], max_age_hours=MAX_AGE_HOURS
 ) -> list[dict]:
@@ -99,43 +96,42 @@ def scrape_fresh_articles(
     ) as response:
       raw_bytes = response.read()
 
-    # Decode and sanitize raw XML
-    raw_text = raw_bytes.decode("utf-8", errors="replace")
+    raw_text = raw_bytes.decode('utf-8', errors='replace')
     clean_xml_text = sanitize_xml(raw_text)
-
-    # Parse sanitized XML
     root = ET.fromstring(clean_xml_text)
 
-    # 1. RSS 2.0 (<channel><item>)
-    channel = root.find("channel")
+    # RSS 2.0
+    channel = root.find('channel')
     if channel is not None:
-      for item in channel.findall("item"):
-        raw_date = item.findtext("pubDate", default="").strip()
+      for item in channel.findall('item'):
+        raw_date = item.findtext('pubDate', default='').strip()
         pub_dt = parse_universal_date(raw_date)
 
         if pub_dt and pub_dt < cutoff_time:
           continue
 
         articles.append({
-            "source": source_name,
-            "category": category,
-            "title": clean_text(item.findtext("title", default="No Title")),
-            "link": item.findtext("link", default="").strip(),
-            "date_obj": pub_dt or datetime.min.replace(tzinfo=timezone.utc),
-            "date_str": pub_dt.strftime("%b %d • %I:%M %p UTC")
-            if pub_dt
-            else "Recent",
-            "desc": clean_text(item.findtext("description", default=""))[:200]
-            + "...",
+            'source': source_name,
+            'category': category,
+            'title': clean_text(item.findtext('title', default='No Title')),
+            'link': item.findtext('link', default='').strip(),
+            'date_obj': pub_dt or datetime.min.replace(tzinfo=timezone.utc),
+            'date_str': (
+                pub_dt.strftime('%b %d • %I:%M %p UTC') if pub_dt else 'Recent'
+            ),
+            'desc': (
+                clean_text(item.findtext('description', default=''))[:200]
+                + '...'
+            ),
         })
 
-    # 2. Atom (<feed><entry>)
-    elif "feed" in root.tag.lower():
-      ns = {"atom": root.tag.split("}")[0].strip("{")}
-      for entry in root.findall("atom:entry", ns):
+    # Atom Feed
+    elif 'feed' in root.tag.lower():
+      ns = {'atom': root.tag.split('}')[0].strip('{')}
+      for entry in root.findall('atom:entry', ns):
         raw_date = entry.findtext(
-            "atom:published",
-            default=entry.findtext("atom:updated", default="", namespaces=ns),
+            'atom:published',
+            default=entry.findtext('atom:updated', default='', namespaces=ns),
             namespaces=ns,
         ).strip()
         pub_dt = parse_universal_date(raw_date)
@@ -143,106 +139,83 @@ def scrape_fresh_articles(
         if pub_dt and pub_dt < cutoff_time:
           continue
 
-        link_elem = entry.find("atom:link", ns)
+        link_elem = entry.find('atom:link', ns)
         link = (
-            link_elem.attrib.get("href", "").strip()
+            link_elem.attrib.get('href', '').strip()
             if link_elem is not None
-            else ""
+            else ''
         )
 
         articles.append({
-            "source": source_name,
-            "category": category,
-            "title": clean_text(
-                entry.findtext("atom:title", default="No Title", namespaces=ns)
+            'source': source_name,
+            'category': category,
+            'title': clean_text(
+                entry.findtext('atom:title', default='No Title', namespaces=ns)
             ),
-            "link": link,
-            "date_obj": pub_dt or datetime.min.replace(tzinfo=timezone.utc),
-            "date_str": pub_dt.strftime("%b %d • %I:%M %p UTC")
-            if pub_dt
-            else "Recent",
-            "desc": clean_text(
-                entry.findtext(
-                    "atom:summary",
-                    default=entry.findtext(
-                        "atom:content", default="", namespaces=ns
-                    ),
-                    namespaces=ns,
-                )
-            )[:200]
-            + "...",
+            'link': link,
+            'date_obj': pub_dt or datetime.min.replace(tzinfo=timezone.utc),
+            'date_str': (
+                pub_dt.strftime('%b %d • %I:%M %p UTC') if pub_dt else 'Recent'
+            ),
+            'desc': (
+                clean_text(
+                    entry.findtext(
+                        'atom:summary',
+                        default=entry.findtext(
+                            'atom:content', default='', namespaces=ns
+                        ),
+                        namespaces=ns,
+                    )
+                )[:200]
+                + '...'
+            ),
         })
 
   except Exception as e:
-    print(f"Error fetching {source_name}: {e}")
+    print(f'Error fetching {source_name}: {e}')
 
   return articles
 
 
+def build_card_html(article: dict) -> str:
+  badge_class = f"badge-{article.get('category', 'markets')}"
+  return f"""
+  <article class="news-card" data-category="{article.get('category', 'markets')}">
+    <div class="card-meta">
+      <div class="card-tags">
+        <span class="badge {badge_class}">{article['category'].upper()}</span>
+        <span class="source-tag">{article['source']}</span>
+      </div>
+      <time class="card-time">{article['date_str']}</time>
+    </div>
+    <h3 class="card-title">
+      <a href="{article['link']}" target="_blank" rel="noopener noreferrer">{article['title']}</a>
+    </h3>
+    <p class="card-desc">{article['desc']}</p>
+  </article>
+  """
+
+
 def generate_html_report(all_articles: list[dict], filename='index.html'):
-  # Sort all articles strictly by time (newest first)
   all_articles.sort(key=lambda x: x['date_obj'], reverse=True)
 
-  sections_data = {
-      'economy': {
-          'title': '🏛️ Economy & Macro',
-          'items': [],
-          'badge_class': 'badge-economy',
-      },
-      'markets': {
-          'title': '📈 Markets & Equities',
-          'items': [],
-          'badge_class': 'badge-markets',
-      },
-      'crypto': {
-          'title': '⚡ Crypto & Digital Assets',
-          'items': [],
-          'badge_class': 'badge-crypto',
-      },
-      'metals': {
-          'title': '🪙 Precious Metals & Gold',
-          'items': [],
-          'badge_class': 'badge-metals',
-      },
-  }
+  tradfi_articles = [
+      a for a in all_articles if a.get('category') in ['economy', 'markets']
+  ]
+  alts_articles = [
+      a for a in all_articles if a.get('category') in ['metals', 'crypto']
+  ]
 
-  for a in all_articles:
-    cat = a.get('category', 'markets')
-    if cat in sections_data:
-      sections_data[cat]['items'].append(a)
-
-  sections_html = ''
-  for key, sec in sections_data.items():
-    cards_markup = ''
-    for a in sec['items']:
-      cards_markup += f"""
-      <article class="news-card">
-        <div class="card-meta">
-          <span class="badge {sec['badge_class']}">{a['source']}</span>
-          <time class="card-time">{a['date_str']}</time>
-        </div>
-        <h3 class="card-title">
-          <a href="{a['link']}" target="_blank" rel="noopener noreferrer">{a['title']}</a>
-        </h3>
-        <p class="card-desc">{a['desc']}</p>
-      </article>
-      """
-    if not sec['items']:
-      cards_markup = (
-          '<p class="empty-state">No stories reported in the last 24 hours.</p>'
-      )
-
-    sections_html += f"""
-    <section class="feed-column" id="{key}">
-      <div class="section-header">
-        <h2>{sec['title']}</h2>
-        <span class="section-count">{len(sec['items'])} items</span>
-      </div>
-      <div class="card-stream">
-        {cards_markup}
-      </div>
-    </section>
-    """
+  tradfi_cards = (
+      ''.join([build_card_html(a) for a in tradfi_articles])
+      if tradfi_articles
+      else '<p class="empty-state">No traditional finance stories reported.</p>'
+  )
+  alts_cards = (
+      ''.join([build_card_html(a) for a in alts_articles])
+      if alts_articles
+      else '<p class="empty-state">No alternative asset stories reported.</p>'
+  )
 
   full_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -254,8 +227,8 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     :root {{
       --bg-body: #090d16;
       --bg-surface: #111827;
-      --bg-surface-hover: #1b2436;
-      --border-color: #1f293d;
+      --bg-surface-hover: #172136;
+      --border-color: #1e293b;
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
       --accent-economy: #34d399;
@@ -273,7 +246,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     }}
 
     header {{
-      max-width: 1700px;
+      max-width: 1440px;
       margin: 0 auto 24px auto;
       display: flex;
       justify-content: space-between;
@@ -284,13 +257,16 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       border-bottom: 1px solid var(--border-color);
     }}
 
-    h1 {{
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.5px;
+    .brand {{
       display: flex;
       align-items: center;
       gap: 10px;
+    }}
+
+    h1 {{
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
     }}
 
     .live-indicator {{
@@ -317,26 +293,31 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       border-color: var(--accent-markets);
     }}
 
-    /* 4-Column Layout */
-    .dashboard-grid {{
-      max-width: 1700px;
+    .dashboard-split {{
+      max-width: 1440px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-      gap: 20px;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
       align-items: start;
     }}
 
-    .feed-column {{
+    @media (max-width: 920px) {{
+      .dashboard-split {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+
+    .column-panel {{
       background: rgba(17, 24, 39, 0.45);
       border: 1px solid var(--border-color);
       border-radius: 12px;
       overflow: hidden;
     }}
 
-    .section-header {{
+    .column-header {{
       background: var(--bg-surface);
-      padding: 14px 18px;
+      padding: 16px 20px;
       border-bottom: 1px solid var(--border-color);
       display: flex;
       justify-content: space-between;
@@ -346,12 +327,15 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       z-index: 10;
     }}
 
-    .section-header h2 {{
+    .column-title {{
       font-size: 15px;
       font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }}
 
-    .section-count {{
+    .column-count {{
       font-size: 11px;
       color: var(--text-muted);
       background: rgba(255, 255, 255, 0.05);
@@ -363,7 +347,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       display: flex;
       flex-direction: column;
       gap: 12px;
-      padding: 14px;
+      padding: 16px;
     }}
 
     .news-card {{
@@ -386,10 +370,15 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       margin-bottom: 8px;
     }}
 
+    .card-tags {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+
     .badge {{
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 700;
-      text-transform: uppercase;
       padding: 2px 6px;
       border-radius: 4px;
       letter-spacing: 0.5px;
@@ -399,6 +388,12 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     .badge-markets {{ background: rgba(56, 189, 248, 0.15); color: var(--accent-markets); }}
     .badge-crypto  {{ background: rgba(192, 132, 252, 0.15); color: var(--accent-crypto); }}
     .badge-metals  {{ background: rgba(234, 179, 8, 0.15); color: var(--accent-metals); }}
+
+    .source-tag {{
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }}
 
     .card-time {{
       font-size: 11px;
@@ -438,12 +433,35 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
 <body>
 
   <header>
-    <h1><span class="live-indicator"></span> Market Wire Hub</h1>
-    <input type="text" id="liveSearch" class="search-bar" placeholder="Search across all columns..." />
+    <div class="brand">
+      <span class="live-indicator"></span>
+      <h1>Market Wire Hub</h1>
+    </div>
+    <input type="text" id="liveSearch" class="search-bar" placeholder="Search headlines & sources..." />
   </header>
 
-  <main class="dashboard-grid">
-    {sections_html}
+  <main class="dashboard-split">
+    <!-- Left Column: Macro & Markets -->
+    <section class="column-panel">
+      <div class="column-header">
+        <div class="column-title">🏛️ Macro, Economy & Equities</div>
+        <span class="column-count">{len(tradfi_articles)} items</span>
+      </div>
+      <div class="card-stream">
+        {tradfi_cards}
+      </div>
+    </section>
+
+    <!-- Right Column: Precious Metals & Crypto -->
+    <section class="column-panel">
+      <div class="column-header">
+        <div class="column-title">🪙 Metals, Gold & Digital Assets</div>
+        <span class="column-count">{len(alts_articles)} items</span>
+      </div>
+      <div class="card-stream">
+        {alts_cards}
+      </div>
+    </section>
   </main>
 
   <script>
@@ -464,7 +482,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
   with open(filename, 'w', encoding='utf-8') as f:
     f.write(full_html)
 
-  print(f'Generated 4-section dashboard in {filename}!')
+  print(f'Generated 2-column split dashboard in {filename}!')
 
 
 if __name__ == '__main__':
@@ -537,21 +555,21 @@ if __name__ == '__main__':
       ('Decrypt', 'crypto', 'https://decrypt.co/feed'),
       ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
       # =========================================================================
-    # =========================================================================
-    # 4. PRECIOUS METALS & GOLD
-    # =========================================================================
-    ("GoldSeek", "metals", "https://news.goldseek.com/newsRSS.xml"),
-    ("Mining.com", "metals", "https://www.mining.com/feed/"),
-    (
-        "Investing.com Gold",
-        "metals",
-        "https://www.investing.com/rss/news_289.rss",
-    ),
-    ("King World News", "metals", "https://kingworldnews.com/feed/"),
+      # 4. PRECIOUS METALS & MINING
+      # =========================================================================
+      ('GoldSeek', 'metals', 'https://news.goldseek.com/newsRSS.xml'),
+      ('Mining.com', 'metals', 'https://www.mining.com/feed/'),
+      (
+          'Investing.com Gold',
+          'metals',
+          'https://www.investing.com/rss/news_289.rss',
+      ),
+      ('MiningFeeds', 'metals', 'https://www.miningfeeds.com/feed/'),
+      ('King World News', 'metals', 'https://kingworldnews.com/feed/'),
   ]
 
   collected = []
-  print(f'Fetching {len(FEEDS)} feeds across 4 sections in parallel...')
+  print(f'Fetching {len(FEEDS)} feeds across all sectors in parallel...')
 
   with ThreadPoolExecutor(max_workers=15) as executor:
     results = list(executor.map(scrape_fresh_articles, FEEDS))

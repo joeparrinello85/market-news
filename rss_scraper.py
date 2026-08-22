@@ -6,38 +6,30 @@ import html
 import json
 import os
 import re
-import ssl
 import time
-import urllib.request
+import requests
 import xml.etree.ElementTree as ET
-
+from bs4 import BeautifulSoup
 import trafilatura
 
-# Configure SSL context
-try:
-    import certifi
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-except ImportError:
-    ssl_context = ssl.create_default_context()
-
-HEADERS = {
+# Session Configuration
+SESSION = requests.Session()
+SESSION.headers.update({
     'User-Agent': (
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        ' (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     ),
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Connection': 'keep-alive',
-}
+})
 
-MAX_AGE_HOURS = 24
+MAX_AGE_HOURS = 72
 CACHE_FILE = "feed_cache.json"
-CACHE_TTL_SECONDS = 900  # 15 minutes
+CACHE_TTL_SECONDS = 900  # 15 mins
 
 PAYWALLED_DOMAINS = [
     "wsj.com", "bloomberg.com", "ft.com", "nytimes.com", "barrons.com",
-    "theinformation.com", "seekingalpha.com", "reuters.com",
-    "northernminer.com", "businessinsider.com/pro"
+    "theinformation.com", "seekingalpha.com", "reuters.com"
 ]
 
 
@@ -62,16 +54,16 @@ def is_paywalled_link(url: str, title: str) -> bool:
         return False
     lower_url = url.lower()
     lower_title = title.lower()
-    if any(domain in lower_url for domain in PAYWALLED_DOMAINS):
+    if any(d in lower_url for d in PAYWALLED_DOMAINS):
         return True
-    if "/pro/" in lower_url or "/premium/" in lower_url or "[subscriber]" in lower_title:
+    if "[subscriber]" in lower_title or "[paywall]" in lower_title:
         return True
     return False
 
 
-def parse_universal_date(date_str: str) -> datetime | None:
+def parse_universal_date(date_str: str) -> datetime:
     if not date_str:
-        return None
+        return datetime.now(timezone.utc)
     cleaned = date_str.strip()
     try:
         dt = parsedate_to_datetime(cleaned)
@@ -88,16 +80,16 @@ def parse_universal_date(date_str: str) -> datetime | None:
         return dt.astimezone(timezone.utc)
     except Exception:
         pass
-    return None
+    return datetime.now(timezone.utc)
 
 
 def clean_headline_tokens(title: str) -> set:
     cleaned = re.sub(r"[^\w\s]", "", title.lower())
-    stop_words = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "is", "after", "with", "vs", "says", "as"}
+    stop_words = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "is", "after", "with", "vs", "says", "as", "how", "what", "why"}
     return {w for w in cleaned.split() if w not in stop_words and len(w) > 2}
 
 
-def is_duplicate(new_tokens: set, seen_token_sets: list, threshold: float = 0.65) -> bool:
+def is_duplicate(new_tokens: set, seen_token_sets: list, threshold: float = 0.75) -> bool:
     if not new_tokens:
         return False
     for existing_tokens in seen_token_sets:
@@ -134,31 +126,26 @@ def save_cache(cache_data: dict):
 
 
 def extract_full_body(article_url: str, fallback_desc: str) -> str:
-    """Extracts clean article body using full browser headers and returns HTML paragraphs."""
+    """Extracts body text cleanly with a strict 3-second timeout."""
     if not article_url:
-        return f"<p>{fallback_desc}</p>" if fallback_desc else "<p>No description available.</p>"
+        return f"<p>{fallback_desc}</p>" if fallback_desc else "<p>No content available.</p>"
     
     try:
-        req = urllib.request.Request(article_url, headers=HEADERS)
-        with urllib.request.urlopen(req, context=ssl_context, timeout=8) as resp:
-            html_content = resp.read().decode('utf-8', errors='replace')
-            
-        extracted = trafilatura.extract(
-            html_content,
-            include_comments=False,
-            include_tables=False,
-            no_fallback=False
-        )
-        
-        if extracted and len(extracted.strip()) > 100:
-            # Format newlines into readable HTML paragraphs
-            paragraphs = [p.strip() for p in extracted.split('\n') if p.strip()]
-            return "".join(f"<p style='margin-bottom: 1.25em;'>{p}</p>" for p in paragraphs)
-            
+        resp = SESSION.get(article_url, timeout=3)
+        if resp.status_code == 200:
+            extracted = trafilatura.extract(
+                resp.text,
+                include_comments=False,
+                include_tables=False,
+                no_fallback=False
+            )
+            if extracted and len(extracted.strip()) > 100:
+                paragraphs = [p.strip() for p in extracted.split('\n') if p.strip()]
+                return "".join(f"<p style='margin-bottom: 1.25em;'>{p}</p>" for p in paragraphs)
     except Exception:
         pass
-        
-    fallback_clean = fallback_desc.strip() if fallback_desc else "No full text available."
+    
+    fallback_clean = fallback_desc.strip() if fallback_desc else "Summary not provided by publisher."
     return f"<p style='margin-bottom: 1.25em;'>{fallback_clean}</p>"
 
 
@@ -168,75 +155,120 @@ def scrape_fresh_articles(feed_tuple: tuple[str, str, str], max_age_hours=MAX_AG
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
 
     try:
-        req = urllib.request.Request(feed_url, headers=HEADERS)
-        with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
-            raw_bytes = response.read()
+        resp = SESSION.get(feed_url, timeout=8)
+        if resp.status_code != 200:
+            print(f"⚠️ [HTTP {resp.status_code}] Skipping {source_name}")
+            return []
 
-        raw_text = raw_bytes.decode('utf-8', errors='replace')
-        clean_xml_text = sanitize_xml(raw_text)
-        root = ET.fromstring(clean_xml_text)
+        clean_xml_text = sanitize_xml(resp.text)
+        
+        try:
+            root = ET.fromstring(clean_xml_text)
+            is_bs4 = False
+        except ET.ParseError:
+            soup = BeautifulSoup(resp.content, "xml")
+            is_bs4 = True
 
-        # RSS 2.0
-        channel = root.find('channel')
-        if channel is not None:
-            for item in channel.findall('item'):
-                title = clean_text(item.findtext('title', default='No Title'))
-                link = item.findtext('link', default='').strip()
-                if is_paywalled_link(link, title):
+        ns = {
+            'atom': 'http://www.w3.org/2005/Atom',
+            'dc': 'http://purl.org/dc/elements/1.1/',
+            'content': 'http://purl.org/rss/1.0/modules/content/'
+        }
+
+        if not is_bs4:
+            channel = root.find('channel')
+            if channel is not None:
+                for item in channel.findall('item'):
+                    title = clean_text(item.findtext('title', default='No Title'))
+                    link = item.findtext('link', default='').strip()
+                    if not link or is_paywalled_link(link, title):
+                        continue
+
+                    raw_date = item.findtext('pubDate', default='') or item.findtext('dc:date', default='', namespaces=ns)
+                    pub_dt = parse_universal_date(raw_date)
+                    if pub_dt < cutoff_time:
+                        continue
+
+                    desc = clean_text(item.findtext('description', default=''))
+                    articles.append({
+                        'source': source_name,
+                        'category': category.lower().strip(),
+                        'title': title,
+                        'link': link,
+                        'iso_date': pub_dt.isoformat(),
+                        'date_str': pub_dt.strftime('%b %d • %I:%M %p UTC'),
+                        'desc': desc,
+                    })
+
+            elif 'feed' in root.tag.lower():
+                atom_ns = {'atom': root.tag.split('}')[0].strip('{')}
+                for entry in root.findall('atom:entry', atom_ns):
+                    title = clean_text(entry.findtext('atom:title', default='No Title', namespaces=atom_ns))
+                    link_elem = entry.find('atom:link', atom_ns)
+                    link = link_elem.attrib.get('href', '').strip() if link_elem is not None else ''
+                    if not link or is_paywalled_link(link, title):
+                        continue
+
+                    raw_date = entry.findtext('atom:published', default=entry.findtext('atom:updated', default='', namespaces=atom_ns), namespaces=atom_ns).strip()
+                    pub_dt = parse_universal_date(raw_date)
+                    if pub_dt < cutoff_time:
+                        continue
+
+                    desc = clean_text(entry.findtext('atom:summary', default=entry.findtext('atom:content', default='', namespaces=atom_ns), namespaces=atom_ns))
+                    articles.append({
+                        'source': source_name,
+                        'category': category.lower().strip(),
+                        'title': title,
+                        'link': link,
+                        'iso_date': pub_dt.isoformat(),
+                        'date_str': pub_dt.strftime('%b %d • %I:%M %p UTC'),
+                        'desc': desc,
+                    })
+        else:
+            for item in soup.find_all(['item', 'entry']):
+                title_tag = item.find(['title'])
+                title = clean_text(title_tag.text) if title_tag else 'No Title'
+                
+                link_tag = item.find(['link'])
+                link = ''
+                if link_tag:
+                    link = link_tag.get('href') or link_tag.text or ''
+                link = link.strip()
+                
+                if not link or is_paywalled_link(link, title):
                     continue
-
-                raw_date = item.findtext('pubDate', default='').strip()
+                    
+                date_tag = item.find(['pubDate', 'published', 'updated', 'dc:date'])
+                raw_date = date_tag.text.strip() if date_tag else ''
                 pub_dt = parse_universal_date(raw_date)
-                if pub_dt and pub_dt < cutoff_time:
+                
+                if pub_dt < cutoff_time:
                     continue
-
-                desc = clean_text(item.findtext('description', default=''))
+                    
+                desc_tag = item.find(['description', 'summary', 'content'])
+                desc = clean_text(desc_tag.text) if desc_tag else ''
+                
                 articles.append({
                     'source': source_name,
-                    'category': category,
+                    'category': category.lower().strip(),
                     'title': title,
                     'link': link,
-                    'iso_date': pub_dt.isoformat() if pub_dt else datetime.now(timezone.utc).isoformat(),
-                    'date_str': pub_dt.strftime('%b %d • %I:%M %p UTC') if pub_dt else 'Recent',
-                    'desc': desc,
-                })
-
-        # Atom
-        elif 'feed' in root.tag.lower():
-            ns = {'atom': root.tag.split('}')[0].strip('{')}
-            for entry in root.findall('atom:entry', ns):
-                title = clean_text(entry.findtext('atom:title', default='No Title', namespaces=ns))
-                link_elem = entry.find('atom:link', ns)
-                link = link_elem.attrib.get('href', '').strip() if link_elem is not None else ''
-                if is_paywalled_link(link, title):
-                    continue
-
-                raw_date = entry.findtext('atom:published', default=entry.findtext('atom:updated', default='', namespaces=ns), namespaces=ns).strip()
-                pub_dt = parse_universal_date(raw_date)
-                if pub_dt and pub_dt < cutoff_time:
-                    continue
-
-                desc = clean_text(entry.findtext('atom:summary', default=entry.findtext('atom:content', default='', namespaces=ns), namespaces=ns))
-                articles.append({
-                    'source': source_name,
-                    'category': category,
-                    'title': title,
-                    'link': link,
-                    'iso_date': pub_dt.isoformat() if pub_dt else datetime.now(timezone.utc).isoformat(),
-                    'date_str': pub_dt.strftime('%b %d • %I:%M %p UTC') if pub_dt else 'Recent',
+                    'iso_date': pub_dt.isoformat(),
+                    'date_str': pub_dt.strftime('%b %d • %I:%M %p UTC'),
                     'desc': desc,
                 })
 
     except Exception as e:
-        print(f'Error fetching {source_name}: {e}')
+        print(f"⚠️ [Error] Skipping {source_name}: {e}")
 
     return articles
 
 
 def deduplicate_articles(articles: list[dict]) -> list[dict]:
+    """Deduplicates headlines within their respective category buckets."""
     deduped = []
     seen_urls = set()
-    seen_token_sets = []
+    category_tokens = {"economy": [], "markets": [], "metals": [], "crypto": []}
 
     for art in articles:
         link = art.get('link', '')
@@ -244,20 +276,24 @@ def deduplicate_articles(articles: list[dict]) -> list[dict]:
         if url_hash and url_hash in seen_urls:
             continue
 
+        cat = art.get('category', 'markets')
         tokens = clean_headline_tokens(art.get('title', ''))
-        if is_duplicate(tokens, seen_token_sets, threshold=0.65):
+        seen_token_sets = category_tokens.get(cat, [])
+
+        if is_duplicate(tokens, seen_token_sets, threshold=0.75):
             continue
 
         if url_hash:
             seen_urls.add(url_hash)
-        seen_token_sets.append(tokens)
+        if cat in category_tokens:
+            category_tokens[cat].append(tokens)
+
         deduped.append(art)
 
     return deduped
 
 
 def enrich_article_with_full_text(art: dict) -> dict:
-    """Worker task to scrape full readable body."""
     art['full_text'] = extract_full_body(art['link'], art.get('desc', ''))
     return art
 
@@ -618,7 +654,9 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       headlineStream.innerHTML = '';
       
       const filtered = articles.filter(a => {{
-        const matchesCategory = currentFilter === 'all' || a.category === currentFilter;
+        const artCat = (a.category || '').toLowerCase().trim();
+        const filterCat = (currentFilter || '').toLowerCase().trim();
+        const matchesCategory = filterCat === 'all' || artCat === filterCat;
         const matchesSearch = currentSearch === '' || 
           a.title.toLowerCase().includes(currentSearch) || 
           a.source.toLowerCase().includes(currentSearch);
@@ -626,7 +664,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
       }});
 
       if (filtered.length === 0) {{
-        headlineStream.innerHTML = '<div class="empty-state" style="padding: 30px;">No matching articles.</div>';
+        headlineStream.innerHTML = '<div class="empty-state" style="padding: 30px;">No matching articles in this category.</div>';
         detailPane.innerHTML = '<div class="empty-state">No matching story found.</div>';
         return;
       }}
@@ -711,8 +749,8 @@ if __name__ == '__main__':
         ('Federal Reserve - Releases', 'economy', 'https://www.federalreserve.gov/feeds/press_all.xml'),
         ('Federal Reserve - Policy', 'economy', 'https://www.federalreserve.gov/feeds/press_monetary.xml'),
         ('SEC Press Releases', 'economy', 'https://www.sec.gov/news/pressreleases.rss'),
-        ('Investing.com Indicators', 'economy', 'https://www.investing.com/rss/news_14.rss'),
         ('Bureau of Labor Statistics', 'economy', 'https://www.bls.gov/feed/bls_latest.rss'),
+        ('Investing.com Indicators', 'economy', 'https://www.investing.com/rss/news_14.rss'),
 
         # 2. MARKETS
         ('Yahoo Finance', 'markets', 'https://finance.yahoo.com/news/rssindex'),
@@ -720,23 +758,19 @@ if __name__ == '__main__':
         ('TechCrunch', 'markets', 'https://techcrunch.com/feed/'),
         ('Investing.com Stocks', 'markets', 'https://www.investing.com/rss/news_25.rss'),
 
-        # 3. METALS
-        ("GoldSeek", "metals", "https://news.goldseek.com/newsRSS.xml"),
-        ("SilverSeek", "metals", "https://silverseek.com/rss.xml"),
-        ("Mining.com", "metals", "https://www.mining.com/feed/"),
-        ("Investing.com Gold", "metals", "https://www.investing.com/rss/news_289.rss"),
-        ("INN Gold", "metals", "https://investingnews.com/category/daily/resource-investing/precious-metals-investing/gold-investing/feed/"),
-        ("INN Silver", "metals", "https://investingnews.com/category/daily/resource-investing/precious-metals-investing/silver-investing/feed/"),
-        ("MiningFeeds", "metals", "https://www.miningfeeds.com/feed/"),
-        ("BullionStar", "metals", "https://www.bullionstar.com/rss"),
-        ("TF Metals Report", "metals", "https://www.tfmetalsreport.com/rss.xml"),
-        ("King World News", "metals", "https://kingworldnews.com/feed/"),
+        # 3. METALS & COMMODITIES
+        ('Mining.com', 'metals', 'https://www.mining.com/feed/'),
+        ('OilPrice Commodities', 'metals', 'https://oilprice.com/rss/main'),
+        ('Investing.com Commodities', 'metals', 'https://www.investing.com/rss/news_11.rss'),
+        ('Investing.com Gold', 'metals', 'https://www.investing.com/rss/news_289.rss'),
+        ('GoldSeek', 'metals', 'https://news.goldseek.com/newsRSS.xml'),
+        ('SilverSeek', 'metals', 'https://silverseek.com/rss.xml'),
 
         # 4. CRYPTO
-        ('CoinDesk', 'crypto', 'https://www.coindesk.com/arc/outboundfeeds/rss/'),
         ('Cointelegraph', 'crypto', 'https://cointelegraph.com/rss'),
-        ('Decrypt', 'crypto', 'https://decrypt.co/feed'),
         ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
+        ('CryptoSlate', 'crypto', 'https://cryptoslate.com/feed/'),
+        ('CoinJournal', 'crypto', 'https://coinjournal.net/news/feed/'),
     ]
 
     cache_data, is_cache_valid = load_cache()
@@ -752,15 +786,27 @@ if __name__ == '__main__':
             for res in results:
                 collected.extend(res)
 
-        print(f"Scraped {len(collected)} raw headlines.")
+        print(f"Total raw items scraped: {len(collected)}")
         deduped = deduplicate_articles(collected)
-        print(f"{len(deduped)} articles after deduplication.")
 
-        print("Extracting full article bodies in parallel...")
-        # Scrape full text for the top 50 freshest unique stories to keep runs snappy
-        top_articles = deduped[:50]
+        categories = {'economy': [], 'markets': [], 'metals': [], 'crypto': []}
+        for art in deduped:
+            cat = art.get('category', 'markets').lower().strip()
+            if cat in categories:
+                categories[cat].append(art)
+
+        print("\n--- Scraped Article Counts per Sector ---")
+        for cat, items in categories.items():
+            print(f"  {cat.upper()}: {len(items)} available")
+        print("-----------------------------------------\n")
+
+        balanced_selection = []
+        for cat, items in categories.items():
+            balanced_selection.extend(items[:20])
+
+        print(f"Extracting full reader text for {len(balanced_selection)} balanced articles...")
         with ThreadPoolExecutor(max_workers=12) as executor:
-            enriched = list(executor.map(enrich_article_with_full_text, top_articles))
+            enriched = list(executor.map(enrich_article_with_full_text, balanced_selection))
 
         final_articles = enriched
         save_cache({"timestamp": time.time(), "articles": final_articles})

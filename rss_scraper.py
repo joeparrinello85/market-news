@@ -46,14 +46,18 @@ def clean_text(raw_html: str) -> str:
 
 
 def sanitize_xml(xml_content: str) -> str:
-  """Fixes unescaped ampersands and invalid control characters that break XML parsers."""
+  """Sanitizes malformed XML entities, bad encodings, and control characters."""
   if not xml_content:
     return ''
+  # Strip XML declaration line to avoid encoding mismatch issues during string parsing
+  xml_content = re.sub(r'<\?xml[^>]*\?>', '', xml_content, count=1)
+  # Fix bare unescaped ampersands
   cleaned = re.sub(
       r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', xml_content
   )
+  # Remove ASCII control characters (keeps tab, newline, cr)
   cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
-  return cleaned
+  return cleaned.strip()
 
 
 def parse_universal_date(date_str: str) -> datetime | None:
@@ -658,18 +662,32 @@ if __name__ == '__main__':
       ('Benzinga', 'markets', 'https://www.benzinga.com/feed'),
       ('TechCrunch', 'markets', 'https://techcrunch.com/feed/'),
       ('OilPrice.com', 'markets', 'https://oilprice.com/rss/main'),
-      # =========================================================================
-      # 3. PRECIOUS METALS & MINING
-      # =========================================================================
-      ('GoldSeek', 'metals', 'https://news.goldseek.com/newsRSS.xml'),
-      ('Mining.com', 'metals', 'https://www.mining.com/feed/'),
-      (
-          'Investing.com Gold',
-          'metals',
-          'https://www.investing.com/rss/news_289.rss',
-      ),
-      ('MiningFeeds', 'metals', 'https://www.miningfeeds.com/feed/'),
-      ('King World News', 'metals', 'https://kingworldnews.com/feed/'),
+     # =========================================================================
+    # 3. PRECIOUS METALS & MINING
+    # =========================================================================
+    ("GoldSeek", "metals", "https://news.goldseek.com/newsRSS.xml"),
+    ("SilverSeek", "metals", "https://silverseek.com/rss.xml"),
+    ("Mining.com", "metals", "https://www.mining.com/feed/"),
+    (
+        "Investing.com Gold",
+        "metals",
+        "https://www.investing.com/rss/news_289.rss",
+    ),
+    (
+        "INN Gold",
+        "metals",
+        "https://investingnews.com/category/daily/resource-investing/precious-metals-investing/gold-investing/feed/",
+    ),
+    (
+        "INN Silver",
+        "metals",
+        "https://investingnews.com/category/daily/resource-investing/precious-metals-investing/silver-investing/feed/",
+    ),
+    ("The Northern Miner", "metals", "https://www.northernminer.com/feed/"),
+    ("MiningFeeds", "metals", "https://www.miningfeeds.com/feed/"),
+    ("BullionStar", "metals", "https://www.bullionstar.com/rss"),
+    ("TF Metals Report", "metals", "https://www.tfmetalsreport.com/rss.xml"),
+    ("King World News", "metals", "https://kingworldnews.com/feed/"),
       # =========================================================================
       # 4. CRYPTO & DIGITAL ASSETS
       # =========================================================================

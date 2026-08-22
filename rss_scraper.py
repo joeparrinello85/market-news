@@ -619,11 +619,7 @@ if __name__ == '__main__':
           'economy',
           'https://www.federalreserve.gov/feeds/press_monetary.xml',
       ),
-      (
-          'FT Global Economy',
-          'economy',
-          'https://www.ft.com/global-economy?format=rss',
-      ),
+
       ('FT World News', 'economy', 'https://www.ft.com/world?format=rss'),
       (
           'Investing.com Indicators',

@@ -791,12 +791,14 @@ if __name__ == '__main__':
         ('Investing.com Gold', 'metals', 'https://www.investing.com/rss/news_289.rss'),
         ('GoldSeek', 'metals', 'https://news.goldseek.com/newsRSS.xml'),
         ('SilverSeek', 'metals', 'https://silverseek.com/rss.xml'),
+        ('CommodityTV', 'metals', 'https://www.commodity-tv.com/ondemand/channel/gold/rss.xml'),
 
         # 4. CRYPTO
         ('Cointelegraph', 'crypto', 'https://cointelegraph.com/rss'),
         ('Bitcoin Magazine', 'crypto', 'https://bitcoinmagazine.com/.rss/full/'),
         ('CryptoSlate', 'crypto', 'https://cryptoslate.com/feed/'),
         ('CoinJournal', 'crypto', 'https://coinjournal.net/news/feed/'),
+        ('CommodityTV', 'crypto', 'https://www.commodity-tv.com/ondemand/channel/bitcoin/rss.xml')
     ]
 
     cache_data, is_cache_valid = load_cache()

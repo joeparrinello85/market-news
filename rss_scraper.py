@@ -6,22 +6,21 @@ import html
 import json
 import os
 import re
+import sys
 import time
 import requests
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import trafilatura
 
-# Session Configuration
-SESSION = requests.Session()
-SESSION.headers.update({
+HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     ),
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-})
+}
 
 MAX_AGE_HOURS = 72
 CACHE_FILE = "feed_cache.json"
@@ -126,12 +125,12 @@ def save_cache(cache_data: dict):
 
 
 def extract_full_body(article_url: str, fallback_desc: str) -> str:
-    """Extracts body text cleanly with a strict 3-second timeout."""
+    """Thread-safe article body extraction with fallback."""
     if not article_url:
         return f"<p>{fallback_desc}</p>" if fallback_desc else "<p>No content available.</p>"
     
     try:
-        resp = SESSION.get(article_url, timeout=3)
+        resp = requests.get(article_url, headers=HEADERS, timeout=3)
         if resp.status_code == 200:
             extracted = trafilatura.extract(
                 resp.text,
@@ -155,9 +154,9 @@ def scrape_fresh_articles(feed_tuple: tuple[str, str, str], max_age_hours=MAX_AG
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
 
     try:
-        resp = SESSION.get(feed_url, timeout=8)
+        resp = requests.get(feed_url, headers=HEADERS, timeout=8)
         if resp.status_code != 200:
-            print(f"⚠️ [HTTP {resp.status_code}] Skipping {source_name}")
+            print(f"⚠️  [HTTP {resp.status_code}] Skipping {source_name}")
             return []
 
         clean_xml_text = sanitize_xml(resp.text)
@@ -259,13 +258,12 @@ def scrape_fresh_articles(feed_tuple: tuple[str, str, str], max_age_hours=MAX_AG
                 })
 
     except Exception as e:
-        print(f"⚠️ [Error] Skipping {source_name}: {e}")
+        print(f"⚠️  [Error] Skipping {source_name}: {e}")
 
     return articles
 
 
 def deduplicate_articles(articles: list[dict]) -> list[dict]:
-    """Deduplicates headlines within their respective category buckets."""
     deduped = []
     seen_urls = set()
     category_tokens = {"economy": [], "markets": [], "metals": [], "crypto": []}
@@ -299,13 +297,21 @@ def enrich_article_with_full_text(art: dict) -> dict:
 
 
 def generate_html_report(all_articles: list[dict], filename='index.html'):
-    for a in all_articles:
-        try:
-            a['date_obj'] = datetime.fromisoformat(a['iso_date'])
-        except Exception:
-            a['date_obj'] = datetime.min.replace(tzinfo=timezone.utc)
+    print(f"Writing {filename} with {len(all_articles)} total articles...")
+    
+    def get_sort_key(item):
+        iso = item.get('iso_date', '')
+        if iso:
+            try:
+                dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                pass
+        return datetime.min.replace(tzinfo=timezone.utc)
 
-    all_articles.sort(key=lambda x: x['date_obj'], reverse=True)
+    all_articles.sort(key=get_sort_key, reverse=True)
 
     json_payload = []
     for idx, a in enumerate(all_articles):
@@ -315,7 +321,8 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
             'category': a['category'],
             'title': a['title'],
             'link': a['link'],
-            'date_str': a['date_str'],
+            'iso_date': a.get('iso_date', ''),
+            'date_str': a.get('date_str', 'Recent'),
             'full_text': a.get('full_text', a.get('desc', '')),
         })
 
@@ -650,6 +657,23 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     const detailPane = document.getElementById('detailPane');
     const searchInput = document.getElementById('searchInput');
 
+    function formatLocalTime(isoStr) {{
+      if (!isoStr) return 'Recent';
+      try {{
+        const d = new Date(isoStr);
+        if (isNaN(d.getTime())) return 'Recent';
+        return d.toLocaleDateString(undefined, {{
+          month: 'short',
+          day: 'numeric'
+        }}) + ' • ' + d.toLocaleTimeString(undefined, {{
+          hour: 'numeric',
+          minute: '2-digit'
+        }});
+      }} catch (e) {{
+        return 'Recent';
+      }}
+    }}
+
     function renderStream() {{
       headlineStream.innerHTML = '';
       
@@ -679,7 +703,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
               <span class="badge badge-${{a.category}}">${{a.category.toUpperCase()}}</span>
               <span class="source-label">${{a.source}}</span>
             </div>
-            <span class="time-label">${{a.date_str}}</span>
+            <span class="time-label">${{formatLocalTime(a.iso_date)}}</span>
           </div>
           <div class="row-title">${{a.title}}</div>
         `;
@@ -703,7 +727,7 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
           <div class="detail-meta">
             <span class="badge badge-${{article.category}}">${{article.category.toUpperCase()}}</span>
             <span class="source-label" style="font-size: 12px; font-weight: 600;">${{article.source}}</span>
-            <span class="time-label">• ${{article.date_str}}</span>
+            <span class="time-label">• ${{formatLocalTime(article.iso_date)}}</span>
           </div>
           <h2 class="detail-title">${{article.title}}</h2>
           <div class="detail-body">${{article.full_text}}</div>
@@ -740,10 +764,12 @@ def generate_html_report(all_articles: list[dict], filename='index.html'):
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(full_html)
 
-    print(f'Generated Full-Text Reader in {filename}!')
+    print(f'✅ Successfully generated {filename} ({os.path.getsize(filename)} bytes)')
 
 
 if __name__ == '__main__':
+    print("🚀 Initializing Market News Wire Pipeline...")
+
     FEEDS = [
         # 1. ECONOMY
         ('Federal Reserve - Releases', 'economy', 'https://www.federalreserve.gov/feeds/press_all.xml'),
@@ -776,17 +802,17 @@ if __name__ == '__main__':
     cache_data, is_cache_valid = load_cache()
 
     if is_cache_valid and cache_data.get("articles"):
-        print(f"Using cached reader data ({len(cache_data['articles'])} articles).")
+        print(f"📦 Using cached articles ({len(cache_data['articles'])} items).")
         final_articles = cache_data["articles"]
     else:
         collected = []
-        print(f'Fetching {len(FEEDS)} RSS feeds in parallel...')
+        print(f'📡 Fetching {len(FEEDS)} RSS feeds in parallel...')
         with ThreadPoolExecutor(max_workers=15) as executor:
             results = list(executor.map(scrape_fresh_articles, FEEDS))
             for res in results:
                 collected.extend(res)
 
-        print(f"Total raw items scraped: {len(collected)}")
+        print(f"📥 Scraped {len(collected)} raw articles.")
         deduped = deduplicate_articles(collected)
 
         categories = {'economy': [], 'markets': [], 'metals': [], 'crypto': []}
@@ -797,15 +823,15 @@ if __name__ == '__main__':
 
         print("\n--- Scraped Article Counts per Sector ---")
         for cat, items in categories.items():
-            print(f"  {cat.upper()}: {len(items)} available")
+            print(f"  {cat.upper()}: {len(items)} items")
         print("-----------------------------------------\n")
 
         balanced_selection = []
         for cat, items in categories.items():
             balanced_selection.extend(items[:20])
 
-        print(f"Extracting full reader text for {len(balanced_selection)} balanced articles...")
-        with ThreadPoolExecutor(max_workers=12) as executor:
+        print(f"⚙️  Extracting full reader text for {len(balanced_selection)} articles...")
+        with ThreadPoolExecutor(max_workers=10) as executor:
             enriched = list(executor.map(enrich_article_with_full_text, balanced_selection))
 
         final_articles = enriched
